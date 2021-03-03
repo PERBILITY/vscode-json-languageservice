@@ -989,7 +989,7 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 			for (const f of node.properties) {
 				const key = f.keyNode;
 				if (key) {
-					validate(key, propertyNames, validationResult, deprecationResult, NoOpSchemaCollector.instance);
+					validate(key, propertyNames, validationResult, deprecationResult, matchingSchemas);
 				}
 			}
 		}
