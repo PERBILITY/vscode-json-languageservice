@@ -348,6 +348,31 @@ export class JSONDocument {
 		}
 		return matchingSchemas.schemas;
 	}
+
+	public getDiagnosticsAndMatchingSchemas(textDocument: TextDocument, schema: JSONSchema, focusOffset: number = -1, exclude?: ASTNode, severity: DiagnosticSeverity = DiagnosticSeverity.Warning) {
+		const matchingSchemas = new SchemaCollector(focusOffset, exclude);
+		const validationResult = new ValidationResult();
+		const deprecationResult = new ValidationResult();
+
+		if (this.root && schema) {
+			validate(this.root, schema, validationResult, deprecationResult, matchingSchemas);
+		}
+
+		validationResult.merge(deprecationResult);
+		const diagnostics = validationResult.problems.map(p => {
+			const range = Range.create(textDocument.positionAt(p.location.offset), textDocument.positionAt(p.location.offset + p.location.length));
+			const diagnostic = Diagnostic.create(range, p.message, p.severity ?? severity, p.code);
+			diagnostic.tags = p.tags;
+
+			return diagnostic;
+		});
+
+
+		return {
+			matchingSchemas: matchingSchemas.schemas,
+			diagnostics
+		};
+	}
 }
 
 function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: ValidationResult, deprecationResult: ValidationResult, matchingSchemas: ISchemaCollector): void {

@@ -8,7 +8,7 @@ import { JSONSchema, JSONSchemaMap, JSONSchemaRef } from '../jsonSchema';
 import { URI } from 'vscode-uri';
 import * as Strings from '../utils/strings';
 import * as Parser from '../parser/jsonParser';
-import { SchemaRequestService, WorkspaceContextService, PromiseConstructor, Thenable, MatchingSchema, TextDocument } from '../jsonLanguageTypes';
+import { SchemaRequestService, WorkspaceContextService, PromiseConstructor, Thenable, MatchingSchema, TextDocument, DocumentLanguageSettings } from '../jsonLanguageTypes';
 
 import * as nls from 'vscode-nls';
 
@@ -594,6 +594,22 @@ export class JSONSchemaService implements IJSONSchemaService {
 				return jsonDocument.getMatchingSchemas(schema.schema).filter(s => !s.inverted);
 			}
 			return [];
+		});
+	}
+
+	public getDiagnosticsAndMatchingSchemas(document: TextDocument, jsonDocument: Parser.JSONDocument, documentSettings?: DocumentLanguageSettings) {
+		return this.getSchemaForResource(document.uri, jsonDocument).then(schema => {
+			if (schema) {
+				const dAndMs = jsonDocument.getDiagnosticsAndMatchingSchemas(document, schema.schema);
+
+				dAndMs.matchingSchemas = dAndMs.matchingSchemas.filter(s => !s.inverted);
+
+				return dAndMs;
+			}
+			return {
+				matchingSchemas: [],
+				diagnostics: []
+			};
 		});
 	}
 
