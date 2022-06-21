@@ -42,6 +42,7 @@ export interface LanguageService {
 	resetSchema(uri: string): boolean;
 	getMatchingSchemas(document: TextDocument, jsonDocument: JSONDocument, schema?: JSONSchema): Thenable<MatchingSchema[]>;
 	getLanguageStatus(document: TextDocument, jsonDocument: JSONDocument): JSONLanguageStatus;
+	getDiagnosticsAndMatchingSchemas(document: TextDocument, jsonDocument: JSONDocument, documentSettings?: DocumentLanguageSettings, schema?: JSONSchema): Thenable<{matchingSchemas: MatchingSchema[], diagnostics: Diagnostic[]}>;
 	doResolve(item: CompletionItem): Thenable<CompletionItem>;
 	doComplete(document: TextDocument, position: Position, doc: JSONDocument): Thenable<CompletionList | null>;
 	findDocumentSymbols(document: TextDocument, doc: JSONDocument, context?: DocumentSymbolsContext): SymbolInformation[];
@@ -84,6 +85,7 @@ export function getLanguageService(params: LanguageServiceParams): LanguageServi
 		parseJSONDocument: (document: TextDocument) => parseJSON(document, { collectComments: true }),
 		newJSONDocument: (root: ASTNode, diagnostics: Diagnostic[]) => newJSONDocument(root, diagnostics),
 		getMatchingSchemas: jsonSchemaService.getMatchingSchemas.bind(jsonSchemaService),
+		getDiagnosticsAndMatchingSchemas: jsonSchemaService.getDiagnosticsAndMatchingSchemas.bind(jsonSchemaService),
 		doResolve: jsonCompletion.doResolve.bind(jsonCompletion),
 		doComplete: jsonCompletion.doComplete.bind(jsonCompletion),
 		findDocumentSymbols: jsonDocumentSymbols.findDocumentSymbols.bind(jsonDocumentSymbols),

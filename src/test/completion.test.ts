@@ -1126,6 +1126,27 @@ suite('JSON Completion', () => {
 		});
 	});
 
+	test('Deprecation without message', async function () {
+		const schema: JSONSchema = {
+			type: 'object',
+			properties: {
+				'prop1': {
+					deprecated: true
+				},
+				'prop2': {
+					type: 'string'
+				},
+			}
+		};
+
+		await testCompletionsFor('{ |', schema, {
+			items: [
+				{ label: 'prop2' },
+				{ label: 'prop1', notAvailable: true }
+			]
+		});
+	});
+
 
 	test('Enum description', async function () {
 		const schema: JSONSchema = {

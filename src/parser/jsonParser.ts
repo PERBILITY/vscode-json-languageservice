@@ -7,7 +7,7 @@ import * as Json from 'jsonc-parser';
 import { JSONSchema, JSONSchemaMap, JSONSchemaRef } from '../jsonSchema';
 import { isNumber, equals, isBoolean, isString, isDefined, isObject } from '../utils/objects';
 import { extendedRegExp } from '../utils/strings';
-import { TextDocument, ASTNode, ObjectASTNode, ArrayASTNode, BooleanASTNode, NumberASTNode, StringASTNode, NullASTNode, PropertyASTNode, JSONPath, ErrorCode, Diagnostic, DiagnosticSeverity, Range } from '../jsonLanguageTypes';
+import { TextDocument, ASTNode, ObjectASTNode, ArrayASTNode, BooleanASTNode, NumberASTNode, StringASTNode, NullASTNode, PropertyASTNode, JSONPath, ErrorCode, Diagnostic, DiagnosticSeverity, Range, DiagnosticTag } from '../jsonLanguageTypes';
 
 import * as nls from 'vscode-nls';
 
@@ -34,6 +34,7 @@ export interface IProblem {
 	severity?: DiagnosticSeverity;
 	code?: ErrorCode;
 	message: string;
+	tags?: DiagnosticTag[]
 }
 
 export abstract class ASTNodeImpl {
@@ -338,7 +339,10 @@ export class JSONDocument {
 			validate(this.root, schema, validationResult, NoOpSchemaCollector.instance);
 			return validationResult.problems.map(p => {
 				const range = Range.create(textDocument.positionAt(p.location.offset), textDocument.positionAt(p.location.offset + p.location.length));
-				return Diagnostic.create(range, p.message, p.severity ?? severity, p.code);
+				const diagnostic = Diagnostic.create(range, p.message, p.severity ?? severity, p.code);
+				diagnostic.tags = p.tags;
+
+				return diagnostic;
 			});
 		}
 		return undefined;
@@ -350,6 +354,31 @@ export class JSONDocument {
 			validate(this.root, schema, new ValidationResult(), matchingSchemas);
 		}
 		return matchingSchemas.schemas;
+	}
+
+	public getDiagnosticsAndMatchingSchemas(textDocument: TextDocument, schema: JSONSchema, focusOffset: number = -1, exclude?: ASTNode, severity: DiagnosticSeverity = DiagnosticSeverity.Warning) {
+		const matchingSchemas = new SchemaCollector(focusOffset, exclude);
+		const validationResult = new ValidationResult();
+		const deprecationResult = new ValidationResult();
+
+		if (this.root && schema) {
+			validate(this.root, schema, validationResult, deprecationResult, matchingSchemas);
+		}
+
+		validationResult.merge(deprecationResult);
+		const diagnostics = validationResult.problems.map(p => {
+			const range = Range.create(textDocument.positionAt(p.location.offset), textDocument.positionAt(p.location.offset + p.location.length));
+			const diagnostic = Diagnostic.create(range, p.message, p.severity ?? severity, p.code);
+			diagnostic.tags = p.tags;
+
+			return diagnostic;
+		});
+
+
+		return {
+			matchingSchemas: matchingSchemas.schemas,
+			diagnostics
+		};
 	}
 }
 
@@ -377,6 +406,8 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 		case 'number':
 			_validateNumberNode(node);
 			break;
+		case 'property':
+			return validate(node.valueNode, schema, validationResult, matchingSchemas);
 	}
 
 	matchingSchemas.add({ node: node, schema: schema });
@@ -503,7 +534,6 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 
 			validate(node, subSchema, subValidationResult, subMatchingSchemas);
 			matchingSchemas.merge(subMatchingSchemas);
-			validationResult.mergeProcessedProperties(subValidationResult);
 
 			if (!subValidationResult.hasProblems()) {
 				if (thenSchema) {
@@ -561,7 +591,8 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 				location: { offset: node.parent.offset, length: node.parent.length },
 				severity: DiagnosticSeverity.Warning,
 				message: deprecationMessage,
-				code: ErrorCode.Deprecated
+				code: ErrorCode.Deprecated,
+				tags: [DiagnosticTag.Deprecated]
 			});
 		}
 	}
@@ -737,6 +768,8 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 				if (item) {
 					validate(item, subSchema, itemValidationResult, matchingSchemas);
 					validationResult.mergePropertyMatch(itemValidationResult);
+				} else if (node.items.length >= subSchemas.length) {
+					validationResult.propertiesValueMatches++;
 				}
 				validationResult.processedProperties.add(String(index));
 			}
@@ -1060,7 +1093,18 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 				}
 			}
 		}
+
+		const propertyNames = asSchema(schema.propertyNames);
+		if (propertyNames) {
+			for (const f of node.properties) {
+				const key = f.keyNode;
+				if (key) {
+					validate(key, propertyNames, validationResult, matchingSchemas);
+				}
+			}
+		}
 	}
+
 }
 
 
