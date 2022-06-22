@@ -362,7 +362,7 @@ export class JSONDocument {
 		const deprecationResult = new ValidationResult();
 
 		if (this.root && schema) {
-			validate(this.root, schema, validationResult, deprecationResult, matchingSchemas);
+			validate(this.root, schema, validationResult, matchingSchemas);
 		}
 
 		validationResult.merge(deprecationResult);
@@ -406,8 +406,6 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 		case 'number':
 			_validateNumberNode(node);
 			break;
-		case 'property':
-			return validate(node.valueNode, schema, validationResult, matchingSchemas);
 	}
 
 	matchingSchemas.add({ node: node, schema: schema });
@@ -768,8 +766,6 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 				if (item) {
 					validate(item, subSchema, itemValidationResult, matchingSchemas);
 					validationResult.mergePropertyMatch(itemValidationResult);
-				} else if (node.items.length >= subSchemas.length) {
-					validationResult.propertiesValueMatches++;
 				}
 				validationResult.processedProperties.add(String(index));
 			}
@@ -1090,16 +1086,6 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 					const propertyValidationResult = new ValidationResult();
 					validate(node, propertySchema, propertyValidationResult, matchingSchemas);
 					validationResult.mergePropertyMatch(propertyValidationResult);
-				}
-			}
-		}
-
-		const propertyNames = asSchema(schema.propertyNames);
-		if (propertyNames) {
-			for (const f of node.properties) {
-				const key = f.keyNode;
-				if (key) {
-					validate(key, propertyNames, validationResult, matchingSchemas);
 				}
 			}
 		}
