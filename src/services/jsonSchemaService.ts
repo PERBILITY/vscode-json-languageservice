@@ -205,7 +205,7 @@ export class ResolvedSchema {
 		} else if (schema.patternProperties) {
 			for (const pattern of Object.keys(schema.patternProperties)) {
 				const regex = Strings.extendedRegExp(pattern);
-				if (regex.test(next)) {
+				if (regex?.test(next)) {
 					return this.getSectionRecursive(path, schema.patternProperties[pattern]);
 				}
 			}
@@ -273,6 +273,9 @@ export class JSONSchemaService implements IJSONSchemaService {
 	}
 
 	public onResourceChange(uri: string): boolean {
+		// always clear this local cache when a resource changes
+		this.cachedSchemaForResource = undefined;
+
 		let hasChanges = false;
 		uri = normalizeId(uri);
 
@@ -336,7 +339,7 @@ export class JSONSchemaService implements IJSONSchemaService {
 		this.cachedSchemaForResource = undefined;
 
 		if (filePatterns) {
-			this.addFilePatternAssociation(filePatterns, [uri]);
+			this.addFilePatternAssociation(filePatterns, [id]);
 		}
 		return unresolvedSchemaContent ? this.addSchemaHandle(id, unresolvedSchemaContent) : this.getOrAddSchemaHandle(id);
 	}
