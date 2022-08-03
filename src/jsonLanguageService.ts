@@ -23,7 +23,7 @@ import {
 	FoldingRange, JSONSchema, SelectionRange, FoldingRangesContext, DocumentSymbolsContext, ColorInformationContext as DocumentColorsContext,
 	TextDocument,
 	Position, CompletionItem, CompletionList, Hover, Range, SymbolInformation, Diagnostic,
-	TextEdit, FormattingOptions, DocumentSymbol, DefinitionLink, MatchingSchema
+	TextEdit, FormattingOptions, DocumentSymbol, DefinitionLink, MatchingSchema, JSONLanguageStatus
 } from './jsonLanguageTypes';
 import { findLinks } from './services/jsonLinks';
 import { DocumentLink } from 'vscode-languageserver-types';
@@ -42,6 +42,7 @@ export interface LanguageService {
 	resetSchema(uri: string): boolean;
 	getMatchingSchemas(document: TextDocument, jsonDocument: JSONDocument, schema?: JSONSchema): Thenable<MatchingSchema[]>;
 	getDiagnosticsAndMatchingSchemas(document: TextDocument, jsonDocument: JSONDocument, documentSettings?: DocumentLanguageSettings, schema?: JSONSchema): Thenable<{matchingSchemas: MatchingSchema[], diagnostics: Diagnostic[]}>;
+	getLanguageStatus(document: TextDocument, jsonDocument: JSONDocument): JSONLanguageStatus;
 	doResolve(item: CompletionItem): Thenable<CompletionItem>;
 	doComplete(document: TextDocument, position: Position, doc: JSONDocument): Thenable<CompletionList | null>;
 	findDocumentSymbols(document: TextDocument, doc: JSONDocument, context?: DocumentSymbolsContext): SymbolInformation[];
@@ -80,6 +81,7 @@ export function getLanguageService(params: LanguageServiceParams): LanguageServi
 		},
 		resetSchema: (uri: string) => jsonSchemaService.onResourceChange(uri),
 		doValidation: jsonValidation.doValidation.bind(jsonValidation),
+		getLanguageStatus: jsonValidation.getLanguageStatus.bind(jsonValidation),
 		parseJSONDocument: (document: TextDocument) => parseJSON(document, { collectComments: true }),
 		newJSONDocument: (root: ASTNode, diagnostics: Diagnostic[]) => newJSONDocument(root, diagnostics),
 		getMatchingSchemas: jsonSchemaService.getMatchingSchemas.bind(jsonSchemaService),

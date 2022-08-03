@@ -11,7 +11,7 @@ import * as Parser from '../parser/jsonParser';
 import { SchemaRequestService, WorkspaceContextService, PromiseConstructor, Thenable, MatchingSchema, TextDocument, DocumentLanguageSettings } from '../jsonLanguageTypes';
 
 import * as nls from 'vscode-nls';
-import { createRegex} from '../utils/glob';
+import { createRegex } from '../utils/glob';
 
 const localize = nls.loadMessageBundle();
 
@@ -57,7 +57,7 @@ export interface ISchemaHandle {
 	/**
 	 * The schema id
 	 */
-	url: string;
+	uri: string;
 
 	/**
 	 * The schema from the file, with potential $ref references
@@ -123,21 +123,22 @@ class FilePatternAssociation {
 	}
 }
 
-type SchemaDependencies = { [uri: string]: true };
+type SchemaDependencies = Set<string>;
 
 class SchemaHandle implements ISchemaHandle {
 
-	public url: string;
-	public dependencies: SchemaDependencies;
-
+	public readonly uri: string;
+	public readonly dependencies: SchemaDependencies;
+	public anchors: Map<string, JSONSchema> | undefined;
 	private resolvedSchema: Thenable<ResolvedSchema> | undefined;
 	private unresolvedSchema: Thenable<UnresolvedSchema> | undefined;
-	private service: JSONSchemaService;
+	private readonly service: JSONSchemaService;
 
-	constructor(service: JSONSchemaService, url: string, unresolvedSchemaContent?: JSONSchema) {
+	constructor(service: JSONSchemaService, uri: string, unresolvedSchemaContent?: JSONSchema) {
 		this.service = service;
-		this.url = url;
-		this.dependencies = {};
+		this.uri = uri;
+		this.dependencies = new Set();
+		this.anchors = undefined;
 		if (unresolvedSchemaContent) {
 			this.unresolvedSchema = this.service.promise.resolve(new UnresolvedSchema(unresolvedSchemaContent));
 		}
@@ -145,7 +146,7 @@ class SchemaHandle implements ISchemaHandle {
 
 	public getUnresolvedSchema(): Thenable<UnresolvedSchema> {
 		if (!this.unresolvedSchema) {
-			this.unresolvedSchema = this.service.loadSchema(this.url);
+			this.unresolvedSchema = this.service.loadSchema(this.uri);
 		}
 		return this.unresolvedSchema;
 	}
@@ -153,16 +154,19 @@ class SchemaHandle implements ISchemaHandle {
 	public getResolvedSchema(): Thenable<ResolvedSchema> {
 		if (!this.resolvedSchema) {
 			this.resolvedSchema = this.getUnresolvedSchema().then(unresolved => {
-				return this.service.resolveSchemaContent(unresolved, this.url, this.dependencies);
+				return this.service.resolveSchemaContent(unresolved, this);
 			});
 		}
 		return this.resolvedSchema;
 	}
 
-	public clearSchema() {
+	public clearSchema(): boolean {
+		const hasChanges = !!this.unresolvedSchema;
 		this.resolvedSchema = undefined;
 		this.unresolvedSchema = undefined;
-		this.dependencies = {};
+		this.dependencies.clear();
+		this.anchors = undefined;
+		return hasChanges;
 	}
 }
 
@@ -286,13 +290,14 @@ export class JSONSchemaService implements IJSONSchemaService {
 			const curr = toWalk.pop()!;
 			for (let i = 0; i < all.length; i++) {
 				const handle = all[i];
-				if (handle && (handle.url === curr || handle.dependencies[curr])) {
-					if (handle.url !== curr) {
-						toWalk.push(handle.url);
+				if (handle && (handle.uri === curr || handle.dependencies.has(curr))) {
+					if (handle.uri !== curr) {
+						toWalk.push(handle.uri);
 					}
-					handle.clearSchema();
+					if (handle.clearSchema()) {
+						hasChanges = true;
+					}
 					all[i] = undefined;
-					hasChanges = true;
 				}
 			}
 		}
@@ -401,7 +406,7 @@ export class JSONSchemaService implements IJSONSchemaService {
 		);
 	}
 
-	public resolveSchemaContent(schemaToResolve: UnresolvedSchema, schemaURL: string, dependencies: SchemaDependencies): Thenable<ResolvedSchema> {
+	public resolveSchemaContent(schemaToResolve: UnresolvedSchema, handle: SchemaHandle): Thenable<ResolvedSchema> {
 
 		const resolveErrors: string[] = schemaToResolve.errors.slice(0);
 		const schema = schemaToResolve.schema;
@@ -412,18 +417,18 @@ export class JSONSchemaService implements IJSONSchemaService {
 				return this.promise.resolve(new ResolvedSchema({}, [localize('json.schema.draft03.notsupported', "Draft-03 schemas are not supported.")]));
 			} else if (id === 'https://json-schema.org/draft/2019-09/schema') {
 				resolveErrors.push(localize('json.schema.draft201909.notsupported', "Draft 2019-09 schemas are not yet fully supported."));
+			} else if (id === 'https://json-schema.org/draft/2020-12/schema') {
+				resolveErrors.push(localize('json.schema.draft202012.notsupported', "Draft 2020-12 schemas are not yet fully supported."));
 			}
 		}
 
 		const contextService = this.contextService;
 
-		const findSection = (schema: JSONSchema, path: string | undefined): any => {
-			if (!path) {
-				return schema;
-			}
+		const findSectionByJSONPointer = (schema: JSONSchema, path: string): any => {
+			path = decodeURIComponent(path);
 			let current: any = schema;
 			if (path[0] === '/') {
-				path = path.substr(1);
+				path = path.substring(1);
 			}
 			path.split('/').some((part) => {
 				part = part.replace(/~1/g, '/').replace(/~0/g, '~');
@@ -433,138 +438,174 @@ export class JSONSchemaService implements IJSONSchemaService {
 			return current;
 		};
 
-		const merge = (target: JSONSchema, sourceRoot: JSONSchema, sourceURI: string, refSegment: string | undefined): void => {
-			const path = refSegment ? decodeURIComponent(refSegment) : undefined;
-			const section = findSection(sourceRoot, path);
-			if (section) {
-				for (const key in section) {
-					if (section.hasOwnProperty(key) && !target.hasOwnProperty(key)) {
-						(<any>target)[key] = section[key];
-					}
+		const findSchemaById = (schema: JSONSchema, handle: SchemaHandle, id: string) => {
+			if (!handle.anchors) {
+				handle.anchors = collectAnchors(schema);
+			}
+			return handle.anchors.get(id);
+		};
+
+		const merge = (target: JSONSchema, section: any): void => {
+			for (const key in section) {
+				if (section.hasOwnProperty(key) && !target.hasOwnProperty(key) && key !== 'id' && key !== '$id') {
+					(<any>target)[key] = section[key];
 				}
-			} else {
-				resolveErrors.push(localize('json.schema.invalidref', '$ref \'{0}\' in \'{1}\' can not be resolved.', path, sourceURI));
 			}
 		};
 
-		const resolveExternalLink = (node: JSONSchema, uri: string, refSegment: string | undefined, parentSchemaURL: string, parentSchemaDependencies: SchemaDependencies): Thenable<any> => {
+		const mergeRef = (target: JSONSchema, sourceRoot: JSONSchema, sourceHandle: SchemaHandle, refSegment: string | undefined): void => {
+			let section;
+			if (refSegment === undefined || refSegment.length === 0) {
+				section = sourceRoot;
+			} else if (refSegment.charAt(0) === '/') {
+				// A $ref to a JSON Pointer (i.e #/definitions/foo)
+				section = findSectionByJSONPointer(sourceRoot, refSegment);
+			} else {
+				// A $ref to a sub-schema with an $id (i.e #hello)
+				section = findSchemaById(sourceRoot, sourceHandle, refSegment);
+			}
+			if (section) {
+				merge(target, section);
+			} else {
+				resolveErrors.push(localize('json.schema.invalidid', '$ref \'{0}\' in \'{1}\' can not be resolved.', refSegment, sourceHandle.uri));
+			}
+		};
+
+		const resolveExternalLink = (node: JSONSchema, uri: string, refSegment: string | undefined, parentHandle: SchemaHandle): Thenable<any> => {
 			if (contextService && !/^[A-Za-z][A-Za-z0-9+\-.+]*:\/\/.*/.test(uri)) {
-				uri = contextService.resolveRelativePath(uri, parentSchemaURL);
+				uri = contextService.resolveRelativePath(uri, parentHandle.uri);
 			}
 			uri = normalizeId(uri);
 			const referencedHandle = this.getOrAddSchemaHandle(uri);
 			return referencedHandle.getUnresolvedSchema().then(unresolvedSchema => {
-				parentSchemaDependencies[uri] = true;
+				parentHandle.dependencies.add(uri);
 				if (unresolvedSchema.errors.length) {
 					const loc = refSegment ? uri + '#' + refSegment : uri;
 					resolveErrors.push(localize('json.schema.problemloadingref', 'Problems loading reference \'{0}\': {1}', loc, unresolvedSchema.errors[0]));
 				}
-				merge(node, unresolvedSchema.schema, uri, refSegment);
-				return resolveRefs(node, unresolvedSchema.schema, uri, referencedHandle.dependencies);
+				mergeRef(node, unresolvedSchema.schema, referencedHandle, refSegment);
+				return resolveRefs(node, unresolvedSchema.schema, referencedHandle);
 			});
 		};
 
-		const resolveRefs = (node: JSONSchema, parentSchema: JSONSchema, parentSchemaURL: string, parentSchemaDependencies: SchemaDependencies): Thenable<any> => {
-			if (!node || typeof node !== 'object') {
-				return Promise.resolve(null);
-			}
-
-			const toWalk: JSONSchema[] = [node];
-			const seen: JSONSchema[] = [];
-
+		const resolveRefs = (node: JSONSchema, parentSchema: JSONSchema, parentHandle: SchemaHandle): Thenable<any> => {
 			const openPromises: Thenable<any>[] = [];
 
-			const collectEntries = (...entries: (JSONSchemaRef | undefined)[]) => {
-				for (const entry of entries) {
-					if (typeof entry === 'object') {
-						toWalk.push(entry);
-					}
-				}
-			};
-			const collectMapEntries = (...maps: (JSONSchemaMap | undefined)[]) => {
-				for (const map of maps) {
-					if (typeof map === 'object') {
-						for (const k in map) {
-							const key = k as keyof JSONSchemaMap;
-							const entry = map[key];
-							if (typeof entry === 'object') {
-								toWalk.push(entry);
-							}
-						}
-					}
-				}
-			};
-			const collectArrayEntries = (...arrays: (JSONSchemaRef[] | undefined)[]) => {
-				for (const array of arrays) {
-					if (Array.isArray(array)) {
-						for (const entry of array) {
-							if (typeof entry === 'object') {
-								toWalk.push(entry);
-							}
-						}
-					}
-				}
-			};
-			const handleRef = (next: JSONSchema) => {
-				const seenRefs = [];
+			this.traverseNodes(node, next => {
+				const seenRefs = new Set<string>();
 				while (next.$ref) {
 					const ref = next.$ref;
 					const segments = ref.split('#', 2);
 					delete next.$ref;
 					if (segments[0].length > 0) {
-						openPromises.push(resolveExternalLink(next, segments[0], segments[1], parentSchemaURL, parentSchemaDependencies));
+						// This is a reference to an external schema
+						openPromises.push(resolveExternalLink(next, segments[0], segments[1], parentHandle));
 						return;
 					} else {
-						if (seenRefs.indexOf(ref) === -1) {
-							merge(next, parentSchema, parentSchemaURL, segments[1]); // can set next.$ref again, use seenRefs to avoid circle
-							seenRefs.push(ref);
+						// This is a reference inside the current schema
+						if (!seenRefs.has(ref)) {
+							const id = segments[1];
+							mergeRef(next, parentSchema, parentHandle, id);
+							seenRefs.add(ref);
 						}
 					}
 				}
+			});
 
-				collectEntries(<JSONSchema>next.items, next.additionalItems, <JSONSchema>next.additionalProperties, next.not, next.contains, next.propertyNames, next.if, next.then, next.else);
-				collectMapEntries(next.definitions, next.properties, next.patternProperties, <JSONSchemaMap>next.dependencies);
-				collectArrayEntries(next.anyOf, next.allOf, next.oneOf, <JSONSchema[]>next.items);
-			};
-
-			while (toWalk.length) {
-				const next = toWalk.pop()!;
-				if (seen.indexOf(next) >= 0) {
-					continue;
-				}
-				seen.push(next);
-				handleRef(next);
-			}
 			return this.promise.all(openPromises);
 		};
 
-		return resolveRefs(schema, schema, schemaURL, dependencies).then(_ => new ResolvedSchema(schema, resolveErrors));
+		const collectAnchors = (root: JSONSchema): Map<string, JSONSchema> => {
+			const result = new Map<string, JSONSchema>();
+			this.traverseNodes(root, next => {
+				const id = next.$id || next.id;
+				if (typeof id === 'string' && id.charAt(0) === '#') {
+					// delete next.$id;
+					// delete next.id;
+					const anchor = id.substring(1);
+					if (result.has(anchor)) {
+						resolveErrors.push(localize('json.schema.duplicateid', 'Duplicate id declaration: \'{0}\'', id));
+					} else {
+						result.set(anchor, next);
+					}
+				}
+			});
+			return result;
+		};
+		return resolveRefs(schema, schema, handle).then(_ => {
+			return new ResolvedSchema(schema, resolveErrors);
+		});
 	}
 
-	public getSchemaForResource(resource: string, document?: Parser.JSONDocument): Thenable<ResolvedSchema | undefined> {
+	private traverseNodes(root: JSONSchema, handle: (node: JSONSchema) => void) {
+		if (!root || typeof root !== 'object') {
+			return Promise.resolve(null);
+		}
+		const seen = new Set<JSONSchema>();
 
-		// first use $schema if present
-		if (document && document.root && document.root.type === 'object') {
-			const schemaProperties = document.root.properties.filter(p => (p.keyNode.value === '$schema') && p.valueNode && p.valueNode.type === 'string');
-			if (schemaProperties.length > 0) {
-				const valueNode = schemaProperties[0].valueNode;
-				if (valueNode && valueNode.type === 'string') {
-					let schemeId = <string>Parser.getNodeValue(valueNode);
-					if (schemeId && Strings.startsWith(schemeId, '.') && this.contextService) {
-						schemeId = this.contextService.resolveRelativePath(schemeId, resource);
-					}
-					if (schemeId) {
-						const id = normalizeId(schemeId);
-						return this.getOrAddSchemaHandle(id).getResolvedSchema();
+		const collectEntries = (...entries: (JSONSchemaRef | undefined)[]) => {
+			for (const entry of entries) {
+				if (typeof entry === 'object') {
+					toWalk.push(entry);
+				}
+			}
+		};
+		const collectMapEntries = (...maps: (JSONSchemaMap | undefined)[]) => {
+			for (const map of maps) {
+				if (typeof map === 'object') {
+					for (const k in map) {
+						const key = k as keyof JSONSchemaMap;
+						const entry = map[key];
+						if (typeof entry === 'object') {
+							toWalk.push(entry);
+						}
 					}
 				}
 			}
-		}
+		};
+		const collectArrayEntries = (...arrays: (JSONSchemaRef[] | undefined)[]) => {
+			for (const array of arrays) {
+				if (Array.isArray(array)) {
+					for (const entry of array) {
+						if (typeof entry === 'object') {
+							toWalk.push(entry);
+						}
+					}
+				}
+			}
+		};
 
-		if (this.cachedSchemaForResource && this.cachedSchemaForResource.resource === resource) {
-			return this.cachedSchemaForResource.resolvedSchema;
-		}
+		const toWalk: JSONSchema[] = [root];
 
+		let next = toWalk.pop();
+		while (next) {
+			if (!seen.has(next)) {
+				seen.add(next);
+				handle(next);
+				collectEntries(<JSONSchema>next.items, next.additionalItems, <JSONSchema>next.additionalProperties, next.not, next.contains, next.propertyNames, next.if, next.then, next.else);
+				collectMapEntries(next.definitions, next.properties, next.patternProperties, <JSONSchemaMap>next.dependencies);
+				collectArrayEntries(next.anyOf, next.allOf, next.oneOf, <JSONSchema[]>next.items);
+			}
+			next = toWalk.pop();
+		}
+	};
+
+	private getSchemaFromProperty(resource: string, document: Parser.JSONDocument): string | undefined {
+		if (document.root?.type === 'object') {
+			for (const p of document.root.properties) {
+				if (p.keyNode.value === '$schema' && p.valueNode?.type === 'string') {
+					let schemaId = p.valueNode.value;
+					if (this.contextService && !/^\w[\w\d+.-]*:/.test(schemaId)) { // has scheme
+						schemaId = this.contextService.resolveRelativePath(schemaId, resource);
+					}
+					return schemaId;
+				}
+			}
+		}
+		return undefined;
+	}
+
+	private getAssociatedSchemas(resource: string): string[] {
 		const seen: { [schemaId: string]: boolean } = Object.create(null);
 		const schemas: string[] = [];
 		const normalizedResource = normalizeResourceForMatching(resource);
@@ -578,6 +619,30 @@ export class JSONSchemaService implements IJSONSchemaService {
 				}
 			}
 		}
+		return schemas;
+	}
+
+	public getSchemaURIsForResource(resource: string, document?: Parser.JSONDocument): string[] {
+		let schemeId = document && this.getSchemaFromProperty(resource, document);
+		if (schemeId) {
+			return [schemeId];
+		}
+		return this.getAssociatedSchemas(resource);
+	}
+
+	public getSchemaForResource(resource: string, document?: Parser.JSONDocument): Thenable<ResolvedSchema | undefined> {
+		if (document) {
+			// first use $schema if present
+			let schemeId = this.getSchemaFromProperty(resource, document);
+			if (schemeId) {
+				const id = normalizeId(schemeId);
+				return this.getOrAddSchemaHandle(id).getResolvedSchema();
+			}
+		}
+		if (this.cachedSchemaForResource && this.cachedSchemaForResource.resource === resource) {
+			return this.cachedSchemaForResource.resolvedSchema;
+		}
+		const schemas = this.getAssociatedSchemas(resource);
 		const resolvedSchema = schemas.length > 0 ? this.createCombinedSchema(resource, schemas).getResolvedSchema() : this.promise.resolve(undefined);
 		this.cachedSchemaForResource = { resource, resolvedSchema };
 		return resolvedSchema;
@@ -598,7 +663,8 @@ export class JSONSchemaService implements IJSONSchemaService {
 	public getMatchingSchemas(document: TextDocument, jsonDocument: Parser.JSONDocument, schema?: JSONSchema): Thenable<MatchingSchema[]> {
 		if (schema) {
 			const id = schema.id || ('schemaservice://untitled/matchingSchemas/' + idCounter++);
-			return this.resolveSchemaContent(new UnresolvedSchema(schema), id, {}).then(resolvedSchema => {
+			const handle = this.addSchemaHandle(id, schema);
+			return handle.getResolvedSchema().then(resolvedSchema => {
 				return jsonDocument.getMatchingSchemas(resolvedSchema.schema).filter(s => !s.inverted);
 			});
 		}
