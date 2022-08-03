@@ -10,9 +10,8 @@ import * as Strings from '../utils/strings';
 import * as Parser from '../parser/jsonParser';
 import { SchemaRequestService, WorkspaceContextService, PromiseConstructor, Thenable, MatchingSchema, TextDocument, DocumentLanguageSettings } from '../jsonLanguageTypes';
 
-import {Minimatch, IMinimatch} from 'minimatch';
-
 import * as nls from 'vscode-nls';
+import { createRegex} from '../utils/glob';
 
 const localize = nls.loadMessageBundle();
 
@@ -74,18 +73,18 @@ export interface ISchemaHandle {
 const BANG = '!';
 const PATH_SEP = '/';
 
-interface IMinimatchWrapper {
-	minimatch: IMinimatch;
+interface IGlobWrapper {
+	regexp: RegExp;
 	include: boolean;
 }
 
 class FilePatternAssociation {
 
 	private readonly uris: string[];
-	private readonly minimatchWrappers: IMinimatchWrapper[];
+	private readonly globWrappers: IGlobWrapper[];
 
 	constructor(pattern: string[], uris: string[]) {
-		this.minimatchWrappers = [];
+		this.globWrappers = [];
 		try {
 			for (let patternString of pattern) {
 				const include = patternString[0] !== BANG;
@@ -96,23 +95,23 @@ class FilePatternAssociation {
 					if (patternString[0] === PATH_SEP) {
 						patternString = patternString.substring(1);
 					}
-					this.minimatchWrappers.push({
-						minimatch: new Minimatch(`**/${patternString}`),
+					this.globWrappers.push({
+						regexp: createRegex('**/' + patternString, { extended: true, globstar: true }),
 						include: include,
 					});
 				}
 			};
 			this.uris = uris;
 		} catch (e) {
-			this.minimatchWrappers.length = 0;
+			this.globWrappers.length = 0;
 			this.uris = [];
 		}
 	}
 
 	public matchesPattern(fileName: string): boolean {
 		let match = false;
-		for (const {minimatch, include} of this.minimatchWrappers) {
-			if (minimatch.match(fileName)) {
+		for (const { regexp, include } of this.globWrappers) {
+			if (regexp.test(fileName)) {
 				match = include;
 			}
 		}
@@ -446,7 +445,7 @@ export class JSONSchemaService implements IJSONSchemaService {
 		};
 
 		const resolveExternalLink = (node: JSONSchema, uri: string, refSegment: string | undefined, parentSchemaURL: string, parentSchemaDependencies: SchemaDependencies): Thenable<any> => {
-			if (contextService && !/^\w+:\/\/.*/.test(uri)) {
+			if (contextService && !/^[A-Za-z][A-Za-z0-9+\-.+]*:\/\/.*/.test(uri)) {
 				uri = contextService.resolveRelativePath(uri, parentSchemaURL);
 			}
 			uri = normalizeId(uri);
