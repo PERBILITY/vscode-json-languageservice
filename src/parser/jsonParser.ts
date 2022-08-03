@@ -4,8 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as Json from 'jsonc-parser';
-import { JSONSchema, JSONSchemaRef } from '../jsonSchema';
-import { isNumber, equals, isBoolean, isString, isDefined } from '../utils/objects';
+import { JSONSchema, JSONSchemaMap, JSONSchemaRef } from '../jsonSchema';
+import { isNumber, equals, isBoolean, isString, isDefined, isObject } from '../utils/objects';
 import { extendedRegExp } from '../utils/strings';
 import { TextDocument, ASTNode, ObjectASTNode, ArrayASTNode, BooleanASTNode, NumberASTNode, StringASTNode, NullASTNode, PropertyASTNode, JSONPath, ErrorCode, Diagnostic, DiagnosticSeverity, Range, DiagnosticTag } from '../jsonLanguageTypes';
 
@@ -214,6 +214,7 @@ export class ValidationResult {
 	public problems: IProblem[];
 
 	public propertiesMatches: number;
+	public processedProperties: Set<string>;
 	public propertiesValueMatches: number;
 	public primaryValueMatches: number;
 	public enumValueMatch: boolean;
@@ -222,6 +223,7 @@ export class ValidationResult {
 	constructor() {
 		this.problems = [];
 		this.propertiesMatches = 0;
+		this.processedProperties = new Set();
 		this.propertiesValueMatches = 0;
 		this.primaryValueMatches = 0;
 		this.enumValueMatch = false;
@@ -262,6 +264,10 @@ export class ValidationResult {
 		if (propertyValidationResult.enumValueMatch && propertyValidationResult.enumValues && propertyValidationResult.enumValues.length === 1) {
 			this.primaryValueMatches++;
 		}
+	}
+
+	public mergeProcessedProperties(validationResult: ValidationResult): void {
+		validationResult.processedProperties.forEach(p => this.processedProperties.add(p));
 	}
 
 	public compare(other: ValidationResult): number {
@@ -330,10 +336,8 @@ export class JSONDocument {
 	public validate(textDocument: TextDocument, schema: JSONSchema | undefined, severity: DiagnosticSeverity = DiagnosticSeverity.Warning): Diagnostic[] | undefined {
 		if (this.root && schema) {
 			const validationResult = new ValidationResult();
-			const deprecationResult = new ValidationResult();
-			validate(this.root, schema, validationResult, deprecationResult, NoOpSchemaCollector.instance);
+			validate(this.root, schema, validationResult, NoOpSchemaCollector.instance);
 
-			validationResult.merge(deprecationResult);
 			return validationResult.problems.map(p => {
 				const range = Range.create(textDocument.positionAt(p.location.offset), textDocument.positionAt(p.location.offset + p.location.length));
 				const diagnostic = Diagnostic.create(range, p.message, p.severity ?? severity, p.code);
@@ -348,7 +352,7 @@ export class JSONDocument {
 	public getMatchingSchemas(schema: JSONSchema, focusOffset: number = -1, exclude?: ASTNode): IApplicableSchema[] {
 		const matchingSchemas = new SchemaCollector(focusOffset, exclude);
 		if (this.root && schema) {
-			validate(this.root, schema, new ValidationResult(), new ValidationResult(), matchingSchemas);
+			validate(this.root, schema, new ValidationResult(), matchingSchemas);
 		}
 		return matchingSchemas.schemas;
 	}
@@ -356,13 +360,11 @@ export class JSONDocument {
 	public getDiagnosticsAndMatchingSchemas(textDocument: TextDocument, schema: JSONSchema, focusOffset: number = -1, exclude?: ASTNode, severity: DiagnosticSeverity = DiagnosticSeverity.Warning) {
 		const matchingSchemas = new SchemaCollector(focusOffset, exclude);
 		const validationResult = new ValidationResult();
-		const deprecationResult = new ValidationResult();
 
 		if (this.root && schema) {
-			validate(this.root, schema, validationResult, deprecationResult, matchingSchemas);
+			validate(this.root, schema, validationResult, matchingSchemas);
 		}
 
-		validationResult.merge(deprecationResult);
 		const diagnostics = validationResult.problems.map(p => {
 			const range = Range.create(textDocument.positionAt(p.location.offset), textDocument.positionAt(p.location.offset + p.location.length));
 			const diagnostic = Diagnostic.create(range, p.message, p.severity ?? severity, p.code);
@@ -379,29 +381,31 @@ export class JSONDocument {
 	}
 }
 
-function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: ValidationResult, deprecationResult: ValidationResult, matchingSchemas: ISchemaCollector): void {
+function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: ValidationResult, matchingSchemas: ISchemaCollector): void {
 
 	if (!n || !matchingSchemas.include(n)) {
 		return;
 	}
+	if (n.type === 'property') {
+		return validate(n.valueNode, schema, validationResult, matchingSchemas);
+	}
 	const node = n;
+	_validateNode();
+
 	switch (node.type) {
 		case 'object':
-			_validateObjectNode(node, schema, validationResult, deprecationResult, matchingSchemas);
+			_validateObjectNode(node);
 			break;
 		case 'array':
-			_validateArrayNode(node, schema, validationResult, deprecationResult, matchingSchemas);
+			_validateArrayNode(node);
 			break;
 		case 'string':
-			_validateStringNode(node, schema, validationResult, deprecationResult, matchingSchemas);
+			_validateStringNode(node);
 			break;
 		case 'number':
-			_validateNumberNode(node, schema, validationResult, deprecationResult, matchingSchemas);
+			_validateNumberNode(node);
 			break;
-		case 'property':
-			return validate(node.valueNode, schema, validationResult, deprecationResult, matchingSchemas);
 	}
-	_validateNode();
 
 	matchingSchemas.add({ node: node, schema: schema });
 	
@@ -429,15 +433,14 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 		}
 		if (Array.isArray(schema.allOf)) {
 			for (const subSchemaRef of schema.allOf) {
-				validate(node, asSchema(subSchemaRef), validationResult,  deprecationResult, matchingSchemas);
+				validate(node, asSchema(subSchemaRef), validationResult,  matchingSchemas);
 			}
 		}
 		const notSchema = asSchema(schema.not);
 		if (notSchema) {
 			const subValidationResult = new ValidationResult();
-			const subDeprecationResult = new ValidationResult();
 			const subMatchingSchemas = matchingSchemas.newSub();
-			validate(node, notSchema, subValidationResult, subDeprecationResult, subMatchingSchemas);
+			validate(node, notSchema, subValidationResult, subMatchingSchemas);
 			if (!subValidationResult.hasProblems()) {
 				validationResult.problems.push({
 					location: { offset: node.offset, length: node.length },
@@ -458,12 +461,10 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 			for (const subSchemaRef of alternatives) {
 				const subSchema = asSchema(subSchemaRef);
 				const subValidationResult = new ValidationResult();
-				const subDeprecationResult = new ValidationResult();
 				const subMatchingSchemas = matchingSchemas.newSub();
-				validate(node, subSchema, subValidationResult, subDeprecationResult, subMatchingSchemas);
+				validate(node, subSchema, subValidationResult, subMatchingSchemas);
 				if (!subValidationResult.hasProblems()) {
 					matches.push(subSchema);
-					deprecationResult.merge(subDeprecationResult);
 				}
 				if (!bestMatch) {
 					bestMatch = { schema: subSchema, validationResult: subValidationResult, matchingSchemas: subMatchingSchemas };
@@ -473,6 +474,7 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 						bestMatch.matchingSchemas.merge(subMatchingSchemas);
 						bestMatch.validationResult.propertiesMatches += subValidationResult.propertiesMatches;
 						bestMatch.validationResult.propertiesValueMatches += subValidationResult.propertiesValueMatches;
+						bestMatch.validationResult.mergeProcessedProperties(subValidationResult);
 					} else {
 						const compareResult = subValidationResult.compare(bestMatch.validationResult);
 						if (compareResult > 0) {
@@ -497,6 +499,7 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 				validationResult.merge(bestMatch.validationResult);
 				validationResult.propertiesMatches += bestMatch.validationResult.propertiesMatches;
 				validationResult.propertiesValueMatches += bestMatch.validationResult.propertiesValueMatches;
+				validationResult.mergeProcessedProperties(bestMatch.validationResult);
 				matchingSchemas.merge(bestMatch.matchingSchemas);
 			}
 			return matches.length;
@@ -510,26 +513,25 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 
 		const testBranch = (schema: JSONSchemaRef) => {
 			const subValidationResult = new ValidationResult();
-			const subDeprecationResult = new ValidationResult();
 			const subMatchingSchemas = matchingSchemas.newSub();
 
-			validate(node, asSchema(schema), subValidationResult, subDeprecationResult, subMatchingSchemas);
+			validate(node, asSchema(schema), subValidationResult, subMatchingSchemas);
 
 			validationResult.merge(subValidationResult);
 			validationResult.propertiesMatches += subValidationResult.propertiesMatches;
 			validationResult.propertiesValueMatches += subValidationResult.propertiesValueMatches;
-			deprecationResult.merge(subDeprecationResult);
+			validationResult.mergeProcessedProperties(subValidationResult);
 			matchingSchemas.merge(subMatchingSchemas);
 		};
 
 		const testCondition = (ifSchema: JSONSchemaRef, thenSchema?: JSONSchemaRef, elseSchema?: JSONSchemaRef) => {
 			const subSchema = asSchema(ifSchema);
 			const subValidationResult = new ValidationResult();
-			const subDeprecationResult = new ValidationResult();
 			const subMatchingSchemas = matchingSchemas.newSub();
 
-			validate(node, subSchema, subValidationResult, subDeprecationResult, subMatchingSchemas);
+			validate(node, subSchema, subValidationResult, subMatchingSchemas);
 			matchingSchemas.merge(subMatchingSchemas);
+			validationResult.mergeProcessedProperties(subValidationResult);
 
 			if (!subValidationResult.hasProblems()) {
 				if (thenSchema) {
@@ -579,21 +581,23 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 			}
 			validationResult.enumValues = [schema.const];
 		}
-	}
 
-	function _checkDeprecation(schema: JSONSchema, node: ASTNode | undefined, deprecationResult: ValidationResult){
-		if ((schema.deprecationMessage || schema.deprecated) && node) {
-			deprecationResult.problems.push({
-				location: { offset: node.offset, length: node.length },
-				severity: DiagnosticSeverity.Hint,
-				message: schema.deprecationMessage || localize('deprecationMessage', 'This value is deprecated'),
+		let deprecationMessage = schema.deprecationMessage;
+		if ((deprecationMessage || schema.deprecated) && node.parent) {
+			deprecationMessage = deprecationMessage || localize('deprecated', 'Value is deprecated');
+			validationResult.problems.push({
+				location: { offset: node.parent.offset, length: node.parent.length },
+				severity: DiagnosticSeverity.Warning,
+				message: deprecationMessage,
 				code: ErrorCode.Deprecated,
 				tags: [DiagnosticTag.Deprecated]
 			});
 		}
 	}
 
-	function _validateNumberNode(node: NumberASTNode, schema: JSONSchema, validationResult: ValidationResult, deprecationResult: ValidationResult, matchingSchemas: ISchemaCollector): void {
+
+
+	function _validateNumberNode(node: NumberASTNode): void {
 		const val = node.value;
 
 		function normalizeFloats(float: number): { value: number, multiplier: number } | null {
@@ -670,10 +674,10 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 				message: localize('maximumWarning', 'Value is above the maximum of {0}.', maximum)
 			});
 		}
-		_checkDeprecation(schema, node, deprecationResult);
+		// _checkDeprecation(schema, node, deprecationResult);
 	}
 
-	function _validateStringNode(node: StringASTNode, schema: JSONSchema, validationResult: ValidationResult, deprecationResult: ValidationResult, matchingSchemas: ISchemaCollector): void {
+	function _validateStringNode(node: StringASTNode): void {
 		if (isNumber(schema.minLength) && node.value.length < schema.minLength) {
 			validationResult.problems.push({
 				location: { offset: node.offset, length: node.length },
@@ -740,69 +744,108 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 			}
 		}
 
-		_checkDeprecation(schema, node, deprecationResult);
+		// _checkDeprecation(schema, node, deprecationResult);
 
 	}
-	function _validateArrayNode(node: ArrayASTNode, schema: JSONSchema, validationResult: ValidationResult, deprecationResult: ValidationResult, matchingSchemas: ISchemaCollector): void {
-		if (Array.isArray(schema.items)) {
-			const subSchemas = schema.items;
-			for (let index = 0; index < subSchemas.length; index++) {
-				const subSchemaRef = subSchemas[index];
+	function _validateArrayNode(node: ArrayASTNode): void {
+		let prefixItemsSchemas: JSONSchemaRef[] | undefined;
+		let additionalItemSchema: JSONSchemaRef | undefined;
+		let isSchema_2020_12 = Array.isArray(schema.prefixItems) || (schema.items !== undefined && !Array.isArray(schema.items) && schema.additionalItems === undefined);
+		if (isSchema_2020_12) {
+			prefixItemsSchemas = schema.prefixItems;
+			additionalItemSchema = !Array.isArray(schema.items) ? schema.items : undefined;
+		} else {
+			prefixItemsSchemas = Array.isArray(schema.items) ? schema.items : undefined;
+			additionalItemSchema = !Array.isArray(schema.items) ? schema.items : schema.additionalItems;
+		}
+		let index = 0;
+		if (prefixItemsSchemas !== undefined) {
+			const max = Math.min(prefixItemsSchemas.length, node.items.length);
+			for (; index < max; index++) {
+				const subSchemaRef = prefixItemsSchemas[index];
 				const subSchema = asSchema(subSchemaRef);
 				const itemValidationResult = new ValidationResult();
-				const itemDeprecationResult = new ValidationResult();
 				const item = node.items[index];
 				if (item) {
-					validate(item, subSchema, itemValidationResult, itemDeprecationResult, matchingSchemas);
+					validate(item, subSchema, itemValidationResult, matchingSchemas);
 					validationResult.mergePropertyMatch(itemValidationResult);
-					deprecationResult.merge(itemDeprecationResult);
-				} else if (node.items.length >= subSchemas.length) {
-					validationResult.propertiesValueMatches++;
 				}
+				validationResult.processedProperties.add(String(index));
 			}
-			if (node.items.length > subSchemas.length) {
-				if (typeof schema.additionalItems === 'object') {
-					for (let i = subSchemas.length; i < node.items.length; i++) {
-						const itemValidationResult = new ValidationResult();
-						const itemDeprecationResult = new ValidationResult();
-						validate(node.items[i], <any>schema.additionalItems, itemValidationResult, itemDeprecationResult, matchingSchemas);
-						validationResult.mergePropertyMatch(itemValidationResult);
-						deprecationResult.merge(itemDeprecationResult);
-					}
-				} else if (schema.additionalItems === false) {
+		}
+		if (additionalItemSchema !== undefined && index < node.items.length) {
+			if (typeof additionalItemSchema === 'boolean') {
+				if (additionalItemSchema === false) {
 					validationResult.problems.push({
 						location: { offset: node.offset, length: node.length },
-						message: localize('additionalItemsWarning', 'Array has too many items according to schema. Expected {0} or fewer.', subSchemas.length)
+						message: localize('additionalItemsWarning', 'Array has too many items according to schema. Expected {0} or fewer.', index)
 					});
 				}
-			}
-		} else {
-			const itemSchema = asSchema(schema.items);
-			if (itemSchema) {
-				for (const item of node.items) {
+				for (; index < node.items.length; index++) {
+					validationResult.processedProperties.add(String(index));
+					validationResult.propertiesValueMatches++;
+				}
+			} else {
+				for (; index < node.items.length; index++) {
 					const itemValidationResult = new ValidationResult();
-					const itemDeprecationResult = new ValidationResult();
-					validate(item, itemSchema, itemValidationResult, itemDeprecationResult, matchingSchemas);
+					validate(node.items[index], additionalItemSchema, itemValidationResult, matchingSchemas);
 					validationResult.mergePropertyMatch(itemValidationResult);
-					deprecationResult.merge(itemDeprecationResult);
+					validationResult.processedProperties.add(String(index));
 				}
 			}
 		}
 
 		const containsSchema = asSchema(schema.contains);
 		if (containsSchema) {
-			const doesContain = node.items.some(item => {
+			let containsCount = 0;
+			for (let index = 0; index < node.items.length; index++) {
+				const item = node.items[index];
 				const itemValidationResult = new ValidationResult();
-				const itemDeprecationResult = new ValidationResult();
-				validate(item, containsSchema, itemValidationResult, itemDeprecationResult, NoOpSchemaCollector.instance);
-				return !itemValidationResult.hasProblems();
-			});
-
-			if (!doesContain) {
+				validate(item, containsSchema, itemValidationResult, NoOpSchemaCollector.instance);
+				if (!itemValidationResult.hasProblems()) {
+					containsCount++;
+					if (isSchema_2020_12) {
+						validationResult.processedProperties.add(String(index));
+					}
+				}
+			}
+			if (containsCount === 0 && !isNumber(schema.minContains)) {
 				validationResult.problems.push({
 					location: { offset: node.offset, length: node.length },
 					message: schema.errorMessage || localize('requiredItemMissingWarning', 'Array does not contain required item.')
 				});
+			}
+			if (isNumber(schema.minContains) && containsCount < schema.minContains) {
+				validationResult.problems.push({
+					location: { offset: node.offset, length: node.length },
+					message: localize('minContainsWarning', 'Array has too few items that match the contains contraint. Expected {0} or more.', schema.minContains)
+				});
+			}
+			if (isNumber(schema.maxContains) && containsCount > schema.maxContains) {
+				validationResult.problems.push({
+					location: { offset: node.offset, length: node.length },
+					message: localize('maxContainsWarning', 'Array has too many items that match the contains contraint. Expected {0} or less.', schema.maxContains)
+				});
+			}
+		}
+
+		const unevaluatedItems = schema.unevaluatedItems;
+		if (unevaluatedItems !== undefined) {
+			for (let i = 0; i < node.items.length; i++) {
+				if (!validationResult.processedProperties.has(String(i))) {
+					if (unevaluatedItems === false) {
+						validationResult.problems.push({
+							location: { offset: node.offset, length: node.length },
+							message: localize('unevaluatedItemsWarning', 'Item does not match any validation rule from the array.')
+						});
+					} else {
+						const itemValidationResult = new ValidationResult();
+						validate(node.items[i], <any>schema.additionalItems, itemValidationResult, matchingSchemas);
+						validationResult.mergePropertyMatch(itemValidationResult);
+					}
+				}
+				validationResult.processedProperties.add(String(i));
+				validationResult.propertiesValueMatches++;
 			}
 		}
 
@@ -833,17 +876,17 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 			}
 		}
 
-		_checkDeprecation(schema, node, deprecationResult);
+		// _checkDeprecation(schema, node, deprecationResult);
 
 	}
 
-	function _validateObjectNode(node: ObjectASTNode, schema: JSONSchema, validationResult: ValidationResult, deprecationResult: ValidationResult, matchingSchemas: ISchemaCollector): void {
+	function _validateObjectNode(node: ObjectASTNode): void {
 		const seenKeys: { [key: string]: ASTNode | undefined } = Object.create(null);
-		const unprocessedProperties: string[] = [];
+		const unprocessedProperties: Set<string> = new Set();
 		for (const propertyNode of node.properties) {
 			const key = propertyNode.keyNode.value;
 			seenKeys[key] = propertyNode.valueNode;
-			unprocessedProperties.push(key);
+			unprocessedProperties.add(key);
 		}
 
 		if (Array.isArray(schema.required)) {
@@ -860,11 +903,8 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 		}
 
 		const propertyProcessed = (prop: string) => {
-			let index = unprocessedProperties.indexOf(prop);
-			while (index >= 0) {
-				unprocessedProperties.splice(index, 1);
-				index = unprocessedProperties.indexOf(prop);
-			}
+			unprocessedProperties.delete(prop);
+			validationResult.processedProperties.add(prop);
 		};
 
 		if (schema.properties) {
@@ -886,22 +926,21 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 						}
 					} else {
 						const propertyValidationResult = new ValidationResult();
-						const propertyDeprecationResult = new ValidationResult();
-						validate(child, propertySchema, propertyValidationResult, propertyDeprecationResult, matchingSchemas);
+						validate(child, propertySchema, propertyValidationResult, matchingSchemas);
 						validationResult.mergePropertyMatch(propertyValidationResult);
 
-						deprecationResult.merge(propertyDeprecationResult);
+						// deprecationResult.merge(propertyDeprecationResult);
 
-						// also show deprecation on the object key if it is unconditionally deprecated
-						if(propertySchema.deprecated || propertySchema.deprecationMessage){
-							const propertyNode = <PropertyASTNode>child.parent;
-							deprecationResult.problems.push({
-								location: { offset: propertyNode.keyNode.offset, length: propertyNode.keyNode.length },
-								message: schema.deprecationMessage || localize('deprecationMessage', 'Property {0} is deprecated', propertyName),
-								tags: [DiagnosticTag.Deprecated],
-								severity: DiagnosticSeverity.Hint
-							});
-						}
+						// // also show deprecation on the object key if it is unconditionally deprecated
+						// if(propertySchema.deprecated || propertySchema.deprecationMessage){
+						// 	const propertyNode = <PropertyASTNode>child.parent;
+						// 	deprecationResult.problems.push({
+						// 		location: { offset: propertyNode.keyNode.offset, length: propertyNode.keyNode.length },
+						// 		message: schema.deprecationMessage || localize('deprecationMessage', 'Property {0} is deprecated', propertyName),
+						// 		tags: [DiagnosticTag.Deprecated],
+						// 		severity: DiagnosticSeverity.Hint
+						// 	});
+						// }
 					}
 				}
 
@@ -911,61 +950,84 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 		if (schema.patternProperties) {
 			for (const propertyPattern of Object.keys(schema.patternProperties)) {
 				const regex = extendedRegExp(propertyPattern);
-				for (const propertyName of unprocessedProperties.slice(0)) {
-					if (regex?.test(propertyName)) {
-						propertyProcessed(propertyName);
-						const child = seenKeys[propertyName];
-						if (child) {
-							const propertySchema = schema.patternProperties[propertyPattern];
-							if (isBoolean(propertySchema)) {
-								if (!propertySchema) {
-									const propertyNode = <PropertyASTNode>child.parent;
-									validationResult.problems.push({
-										location: { offset: propertyNode.keyNode.offset, length: propertyNode.keyNode.length },
-										message: schema.errorMessage || localize('DisallowedExtraPropWarning', 'Property {0} is not allowed.', propertyName)
-									});
+				if (regex) {
+					const processed = [];
+					for (const propertyName of unprocessedProperties) {
+						if (regex.test(propertyName)) {
+							processed.push(propertyName);
+							const child = seenKeys[propertyName];
+							if (child) {
+								const propertySchema = schema.patternProperties[propertyPattern];
+								if (isBoolean(propertySchema)) {
+									if (!propertySchema) {
+										const propertyNode = <PropertyASTNode>child.parent;
+										validationResult.problems.push({
+											location: { offset: propertyNode.keyNode.offset, length: propertyNode.keyNode.length },
+											message: schema.errorMessage || localize('DisallowedExtraPropWarning', 'Property {0} is not allowed.', propertyName)
+										});
+									} else {
+										validationResult.propertiesMatches++;
+										validationResult.propertiesValueMatches++;
+									}
 								} else {
-									validationResult.propertiesMatches++;
-									validationResult.propertiesValueMatches++;
+									const propertyValidationResult = new ValidationResult();
+									validate(child, propertySchema, propertyValidationResult, matchingSchemas);
+									validationResult.mergePropertyMatch(propertyValidationResult);
 								}
-							} else {
-								const propertyValidationResult = new ValidationResult();
-								const propertyDeprecationResult = new ValidationResult();
-								validate(child, propertySchema, propertyValidationResult, propertyDeprecationResult, matchingSchemas);
-								validationResult.mergePropertyMatch(propertyValidationResult);
-								deprecationResult.merge(propertyDeprecationResult);
 							}
 						}
 					}
+					processed.forEach(propertyProcessed);
 				}
 			}
 		}
 
-		if (typeof schema.additionalProperties === 'object') {
+
+		const additionalProperties = schema.additionalProperties;
+		if (additionalProperties !== undefined && additionalProperties !== true) {
 			for (const propertyName of unprocessedProperties) {
+				propertyProcessed(propertyName);
 				const child = seenKeys[propertyName];
 				if (child) {
-					const propertyValidationResult = new ValidationResult();
-					const propertyDeprecationResult = new ValidationResult();
-					validate(child, <any>schema.additionalProperties, propertyValidationResult, propertyDeprecationResult, matchingSchemas);
-					validationResult.mergePropertyMatch(propertyValidationResult);
-					deprecationResult.merge(propertyDeprecationResult);
-				}
-			}
-		} else if (schema.additionalProperties === false) {
-			if (unprocessedProperties.length > 0) {
-				for (const propertyName of unprocessedProperties) {
-					const child = seenKeys[propertyName];
-					if (child) {
+					if (additionalProperties === false) {
 						const propertyNode = <PropertyASTNode>child.parent;
 
 						validationResult.problems.push({
 							location: { offset: propertyNode.keyNode.offset, length: propertyNode.keyNode.length },
 							message: schema.errorMessage || localize('DisallowedExtraPropWarning', 'Property {0} is not allowed.', propertyName)
 						});
+					} else {
+						const propertyValidationResult = new ValidationResult();
+						validate(child, additionalProperties, propertyValidationResult, matchingSchemas);
+						validationResult.mergePropertyMatch(propertyValidationResult);
 					}
 				}
 			}
+		}
+		const unevaluatedProperties = schema.unevaluatedProperties;
+		if (unevaluatedProperties !== undefined && unevaluatedProperties !== true) {
+			const processed = [];
+			for (const propertyName of unprocessedProperties) {
+				if (!validationResult.processedProperties.has(propertyName)) {
+					processed.push(propertyName);
+					const child = seenKeys[propertyName];
+					if (child) {
+						if (unevaluatedProperties === false) {
+							const propertyNode = <PropertyASTNode>child.parent;
+
+							validationResult.problems.push({
+								location: { offset: propertyNode.keyNode.offset, length: propertyNode.keyNode.length },
+								message: schema.errorMessage || localize('DisallowedExtraPropWarning', 'Property {0} is not allowed.', propertyName)
+							});
+						} else {
+							const propertyValidationResult = new ValidationResult();
+							validate(child, unevaluatedProperties, propertyValidationResult, matchingSchemas);
+							validationResult.mergePropertyMatch(propertyValidationResult);
+						}
+					}
+				}
+			}
+			processed.forEach(propertyProcessed);
 		}
 
 		if (isNumber(schema.maxProperties)) {
@@ -986,32 +1048,30 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 			}
 		}
 
+		if (schema.dependentRequired) {
+			for (const key in schema.dependentRequired) {
+				const prop = seenKeys[key];
+				const propertyDeps = schema.dependentRequired[key];
+				if (prop && Array.isArray(propertyDeps)) {
+					_validatePropertyDependencies(key, propertyDeps);
+				}
+			}
+		}
+		if (schema.dependentSchemas) {
+			for (const key in schema.dependentSchemas) {
+				const prop = seenKeys[key];
+				const propertyDeps = schema.dependentSchemas[key];
+				if (prop && isObject(propertyDeps)) {
+					_validatePropertyDependencies(key, propertyDeps);
+				}
+			}
+		}
+
 		if (schema.dependencies) {
-			for (const key of Object.keys(schema.dependencies)) {
+			for (const key in schema.dependencies) {
 				const prop = seenKeys[key];
 				if (prop) {
-					const propertyDep = schema.dependencies[key];
-					if (Array.isArray(propertyDep)) {
-						for (const requiredProp of propertyDep) {
-							if (!seenKeys[requiredProp]) {
-								validationResult.problems.push({
-									location: { offset: node.offset, length: node.length },
-									message: localize('RequiredDependentPropWarning', 'Object is missing property {0} required by property {1}.', requiredProp, key)
-								});
-							} else {
-								validationResult.propertiesValueMatches++;
-							}
-						}
-					} else {
-						const propertySchema = asSchema(propertyDep);
-						if (propertySchema) {
-							const propertyValidationResult = new ValidationResult();
-							const propertyDeprecationResult = new ValidationResult();
-							validate(node, propertySchema, propertyValidationResult, propertyDeprecationResult, matchingSchemas);
-							validationResult.mergePropertyMatch(propertyValidationResult);
-							deprecationResult.merge(propertyDeprecationResult);
-						}
-					}
+					_validatePropertyDependencies(key, schema.dependencies[key]);
 				}
 			}
 		}
@@ -1021,12 +1081,33 @@ function validate(n: ASTNode | undefined, schema: JSONSchema, validationResult: 
 			for (const f of node.properties) {
 				const key = f.keyNode;
 				if (key) {
-					validate(key, propertyNames, validationResult, deprecationResult, matchingSchemas);
+					validate(key, propertyNames, validationResult, matchingSchemas);
+				}
+			}
+		}
+
+		function _validatePropertyDependencies(key: string, propertyDep: string[] | JSONSchemaRef) {
+			if (Array.isArray(propertyDep)) {
+				for (const requiredProp of propertyDep) {
+					if (!seenKeys[requiredProp]) {
+						validationResult.problems.push({
+							location: { offset: node.offset, length: node.length },
+							message: localize('RequiredDependentPropWarning', 'Object is missing property {0} required by property {1}.', requiredProp, key)
+						});
+					} else {
+						validationResult.propertiesValueMatches++;
+					}
+				}
+			} else {
+				const propertySchema = asSchema(propertyDep);
+				if (propertySchema) {
+					const propertyValidationResult = new ValidationResult();
+					validate(node, propertySchema, propertyValidationResult, matchingSchemas);
+					validationResult.mergePropertyMatch(propertyValidationResult);
 				}
 			}
 		}
 	}
-
 }
 
 
@@ -1203,7 +1284,7 @@ export function parse(textDocument: TextDocument, config?: JSONDocumentConfig): 
 		const seen = keysSeen[key.value];
 		if (seen) {
 			_errorAtRange(localize('DuplicateKeyWarning', "Duplicate object key"), ErrorCode.DuplicateKey, node.keyNode.offset, node.keyNode.offset + node.keyNode.length, DiagnosticSeverity.Warning);
-			if (typeof seen === 'object') {
+			if (isObject(seen)) {
 				_errorAtRange(localize('DuplicateKeyWarning', "Duplicate object key"), ErrorCode.DuplicateKey, seen.keyNode.offset, seen.keyNode.offset + seen.keyNode.length, DiagnosticSeverity.Warning);
 			}
 			keysSeen[key.value] = true; // if the same key is duplicate again, avoid duplicate error reporting

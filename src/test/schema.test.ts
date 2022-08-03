@@ -6,7 +6,7 @@
 import * as assert from 'assert';
 import * as SchemaService from '../services/jsonSchemaService';
 import * as Parser from '../parser/jsonParser';
-import * as fs from 'fs';
+import { promises as fs } from 'fs';
 import * as url from 'url';
 import * as path from 'path';
 import { getLanguageService, JSONSchema, SchemaRequestService, TextDocument, MatchingSchema, DiagnosticTag } from '../jsonLanguageService';
@@ -34,7 +34,7 @@ suite('JSON Schema', () => {
 
 	function newMockRequestService(schemas: { [uri: string]: JSONSchema } = {}, accesses: string[] = []): SchemaRequestService {
 
-		return (uri: string): Promise<string> => {
+		return async (uri: string): Promise<string> => {
 			if (uri.length && uri[uri.length - 1] === '#') {
 				uri = uri.substr(0, uri.length - 1);
 			}
@@ -48,14 +48,10 @@ suite('JSON Schema', () => {
 
 			const fileName = fixureDocuments[uri];
 			if (fileName) {
-				return new Promise<string>((c, e) => {
-					const fixturePath = path.join(__dirname, '../../../src/test/fixtures', fileName);
-					fs.readFile(fixturePath, 'UTF-8', (err, result) => {
-						err ? e("Resource not found") : c(result.toString());
-					});
-				});
+				const fixturePath = path.join(__dirname, '../../../src/test/fixtures', fileName);
+				return (await fs.readFile(fixturePath)).toString();
 			}
-			return Promise.reject<string>("Resource not found");
+			throw new Error("Resource not found");
 		};
 	}
 
@@ -309,6 +305,46 @@ suite('JSON Schema', () => {
 		assert.deepStrictEqual(fs?.schema.properties?.p2, {
 			type: 'string',
 			const: 'world'
+		});
+	});
+
+	test('Resolving $refs to local $anchors', async function () {
+		const service = new SchemaService.JSONSchemaService(newMockRequestService(), workspaceContext);
+
+		service.setSchemaContributions({
+			schemas: {
+				"https://example.com/schemas/address": {
+					"$id": "https://example.com/schemas/address",
+
+					"type": "object",
+					"properties": {
+						"street_address":
+						{
+							"$anchor": "street_address",
+							"type": "string"
+						},
+						"city": { "type": "string" },
+						"state": { "type": "string" }
+					},
+					"required": ["street_address", "city", "state"]
+				},
+				"https://example.com/schemas/customer": {
+					"$id": "https://example.com/schemas/customer",
+
+					"type": "object",
+					"properties": {
+						"first_name": { "type": "string" },
+						"last_name": { "type": "string" },
+						"street_address": { "$ref": "/schemas/address#street_address" },
+					}
+				}
+			}
+		});
+
+		const fs = await service.getResolvedSchema('https://example.com/schemas/customer');
+		assert.deepStrictEqual(fs?.schema.properties?.street_address, {
+			type: 'string',
+			$anchor: "street_address"
 		});
 	});
 
