@@ -1,3 +1,27 @@
+5.1.0 / 2022-07-11
+================
+* new API option `FormattingOptions.keepLines` to indicate the formatter should keep the initial line positions 
+
+5.0.0 / 2022-05-17
+================
+ * Update to `vscode-languageserver-types@3.17`
+ * Add more schema support 
+   * Schema 2019-09: unevaluatedProperties, unevaluatedItems, minContains, maxContains, deprecated, dependentRequired, dependentSchemas, $defs, $anchor
+   * Schema 2020-12: prefixItem
+
+4.2.0 / 2022-01-25
+================
+ * new API `LanguageService.getLanguageStatus`
+ * support for $ref with $id
+
+4.1.6 / 2021-07-16
+================
+ * Replace minimatch with glob-to-regexp
+ 
+4.1.0 / 2021-04-24
+================
+ * `SchemaConfiguration.fileMatch` now supports glob patterns (e.g. /foo/**/bar.json')
+
 4.0.0 / 2020-12-14
 ================
  * Update to `vscode-languageserver-types@3.16`

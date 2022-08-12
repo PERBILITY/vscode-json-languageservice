@@ -354,7 +354,12 @@ suite('JSON Completion', () => {
 					items: {
 						type: 'string'
 					}
-				}
+				},
+				"version": {
+					"type": "number",
+					"const": 2,
+					"markdownDescription": "version",
+				},
 			}
 		};
 		await testCompletionsFor('{ "a": | }', schema, {
@@ -377,6 +382,18 @@ suite('JSON Completion', () => {
 			count: 3,
 			items: [
 				{ label: '"John"', resultText: '{ "a": "John", "b": 1 }' }
+			]
+		});
+		await testCompletionsFor('{ "version": | }', schema, {
+			count: 1,
+			items: [
+				{ label: '2', resultText: '{ "version": 2 }' },
+			]
+		});
+		await testCompletionsFor('{ "version": 2| }', schema, {
+			count: 1,
+			items: [
+				{ label: '2', resultText: '{ "version": 2 }' },
 			]
 		});
 	});
@@ -1076,6 +1093,10 @@ suite('JSON Completion', () => {
 				pattern: {
 					type: 'object',
 					defaultSnippets: [{ label: 'pattern snippet', bodyText: '{}' }]
+				},
+				"(?i)caseinsensitive": {
+					type: 'object',
+					defaultSnippets: [{ label: 'case insensitive snippet', bodyText: '{}' }]
 				}
 			},
 			additionalProperties: {
@@ -1090,6 +1111,10 @@ suite('JSON Completion', () => {
 
 		await testCompletionsFor('{"pattern_test":|', schema, {
 			items: [{ label: 'pattern snippet' }]
+		});
+
+		await testCompletionsFor('{"CaseInsensitive_test":|', schema, {
+			items: [{ label: 'case insensitive snippet' }]
 		});
 
 		await testCompletionsFor('{"additional_test":|', schema, {

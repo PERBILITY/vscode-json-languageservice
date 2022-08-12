@@ -6,23 +6,35 @@
 import { JSONWorkerContribution, JSONPath, Segment, CompletionsCollector } from './jsonContributions';
 import { JSONSchema } from './jsonSchema';
 import {
-	Range, TextEdit, Color, ColorInformation, ColorPresentation, FoldingRange, FoldingRangeKind, MarkupKind, SelectionRange,
-	Diagnostic, DiagnosticSeverity,	DiagnosticTag,
-	CompletionItem, CompletionItemKind, CompletionList, Position,
-	InsertTextFormat, MarkupContent,
+	Range, Position, DocumentUri, MarkupContent, MarkupKind, DiagnosticTag,
+	Color, ColorInformation, ColorPresentation,
+	FoldingRange, FoldingRangeKind, SelectionRange,
+	Diagnostic, DiagnosticSeverity,
+	CompletionItem, CompletionItemKind, CompletionList, CompletionItemTag,
+	InsertTextFormat,
 	SymbolInformation, SymbolKind, DocumentSymbol, Location, Hover, MarkedString, FormattingOptions as LSPFormattingOptions, DefinitionLink,
+	CodeActionContext, Command, CodeAction,
+	DocumentHighlight, DocumentLink, WorkspaceEdit,
+	TextEdit, CodeActionKind,
+	TextDocumentEdit, VersionedTextDocumentIdentifier, DocumentHighlightKind
 } from 'vscode-languageserver-types';
 
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
 export {
 	TextDocument,
-	Range, TextEdit, JSONSchema, JSONWorkerContribution, JSONPath, Segment, CompletionsCollector,
-	Color, ColorInformation, ColorPresentation, FoldingRange, FoldingRangeKind, SelectionRange,
+	Range, Position, DocumentUri, MarkupContent, MarkupKind,
+	JSONSchema, JSONWorkerContribution, JSONPath, Segment, CompletionsCollector,
+	Color, ColorInformation, ColorPresentation,
+	FoldingRange, FoldingRangeKind, SelectionRange,
 	Diagnostic, DiagnosticSeverity, DiagnosticTag,
-	CompletionItem, CompletionItemKind, CompletionList, Position,
-	InsertTextFormat, MarkupContent, MarkupKind, DefinitionLink,
+	CompletionItem, CompletionItemKind, CompletionList, CompletionItemTag,
+	InsertTextFormat, DefinitionLink,
 	SymbolInformation, SymbolKind, DocumentSymbol, Location, Hover, MarkedString,
+	CodeActionContext, Command, CodeAction,
+	DocumentHighlight, DocumentLink, WorkspaceEdit,
+	TextEdit, CodeActionKind,
+	TextDocumentEdit, VersionedTextDocumentIdentifier, DocumentHighlightKind
 };
 
 /**
@@ -47,7 +59,8 @@ export enum ErrorCode {
 	TrailingComma = 0x207,
 	DuplicateKey = 0x208,
 	CommentNotPermitted = 0x209,
-	SchemaResolveError = 0x300
+	SchemaResolveError = 0x300,
+	SchemaUnsupportedFeature = 0x301
 }
 
 export type ASTNode = ObjectASTNode | PropertyASTNode | ArrayASTNode | StringASTNode | NumberASTNode | BooleanASTNode | NullASTNode;
@@ -100,6 +113,10 @@ export interface MatchingSchema {
 	schema: JSONSchema;
 }
 
+export interface JSONLanguageStatus {
+	schemas: string[];
+}
+
 export interface LanguageSettings {
 	/**
 	 * If set, the validator will return syntax and semantic errors.
@@ -147,8 +164,9 @@ export interface SchemaConfiguration {
 	 */
 	uri: string;
 	/**
-	 * A list of file path patterns that are associated to the schema. The '*' wildcard can be used. Exclusion patterns starting with '!'. 
-	 * For example '*.schema.json', 'package.json', '!foo*.schema.json'. 
+	 * A list of glob patterns that describe for which file URIs the JSON schema will be used.
+	 * '*' and '**' wildcards are supported. Exclusion patterns start with '!'.
+	 * For example '*.schema.json', 'package.json', '!foo*.schema.json', 'foo/**\/BADRESP.json'.
 	 * A match succeeds when there is at least one pattern matching and last matching pattern does not start with '!'.
 	 */
 	fileMatch?: string[];
@@ -328,4 +346,5 @@ export interface ColorInformationContext {
 
 export interface FormattingOptions extends LSPFormattingOptions {
 	insertFinalNewline?: boolean;
+	keepLines?: boolean;
 }
